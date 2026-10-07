@@ -8,7 +8,7 @@ A small .NET 10 proof of concept that runs [Rebus](https://github.com/rebus-org/
 | --- | --- |
 | `src/RebusPoc.Contracts` | Shared event types (`OrderPlaced`). The provider and client both reference it. |
 | `src/RebusPoc.EventProvider` | Publishes an `OrderPlaced` event every 2 seconds. It's a one-way client with no input queue. |
-| `src/RebusPoc.EventClient` | Subscribes to `OrderPlaced` and logs every event it receives. It reads from the `event-client` queue. |
+| `src/RebusPoc.EventClient` | Subscribes to `OrderPlaced` and stores every event it receives as an order. It reads from the `event-client` queue and also hosts the Orders CRUD API. |
 | `src/RebusPoc.AppHost` | Launcher. It starts the SQL Server container, then starts the client and the provider with the connection string. |
 
 ## How it works
@@ -17,6 +17,26 @@ A small .NET 10 proof of concept that runs [Rebus](https://github.com/rebus-org/
 - At startup the client subscribes to `OrderPlaced`, which adds a row to that table.
 - When the provider publishes, it looks up the subscribers in the table and writes the message straight into each subscriber's queue table (`event-client`).
 - Rebus creates the tables it needs automatically.
+
+## Orders API (EventClient)
+
+`EventClient` is also a web app on `http://localhost:5080`. It stores orders with EF Core in a separate `Orders` database on the same SQL Server. The database is created at startup with `EnsureCreated`, and the AppHost passes its connection string as `ConnectionStrings__Orders`.
+
+| Method | Route | Request | Result |
+| --- | --- | --- | --- |
+| `GET` | `/orders` | `ListOrdersQuery` | 200 with all orders |
+| `GET` | `/orders/{id}` | `GetOrderQuery` | 200 / 404 |
+| `POST` | `/orders` `{ "amount": 42.5 }` | `CreateOrderCommand` | 201 with Location |
+| `PUT` | `/orders/{id}` `{ "amount": 99.99 }` | `UpdateOrderCommand` | 200 / 404 |
+| `DELETE` | `/orders/{id}` | `DeleteOrderCommand` | 204 / 404 |
+
+`src/RebusPoc.EventClient/RebusPoc.EventClient.http` has sample requests.
+
+The API follows CQRS with MediatR 12.5 (the last Apache-2.0 release):
+
+- Requests implement either `ICommand<T>` or `IQuery<T>` (`Messaging/ICommand.cs`). Handlers only change the `DbContext`. They never call `SaveChanges`.
+- `TransactionBehavior` (`Messaging/TransactionBehavior.cs`) wraps every **command** in a `TransactionScope`. It runs the handler, calls `SaveChangesAsync` and completes the scope. If anything throws, the scope is disposed without completing, which rolls back. Queries skip the behavior.
+- `OrderPlacedHandler` (Rebus) sends `CreateOrderCommand` through `IMediator`, so an incoming event goes through the same handler and transaction as `POST /orders`. When the command fails, the transaction rolls back and Rebus retries the message. `CreateOrderCommand` is idempotent on the order Id, so redelivered events are safe.
 
 ## Prerequisites
 

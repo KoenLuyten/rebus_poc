@@ -1,13 +1,26 @@
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Rebus.Config;
 using RebusPoc.Contracts;
 using RebusPoc.EventClient;
+using RebusPoc.EventClient.Messaging;
+using RebusPoc.EventClient.Orders;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("Rebus")
     ?? throw new InvalidOperationException("Missing connection string 'ConnectionStrings:Rebus'.");
+var ordersConnectionString = builder.Configuration.GetConnectionString("Orders")
+    ?? throw new InvalidOperationException("Missing connection string 'ConnectionStrings:Orders'.");
+
+// No EnableRetryOnFailure: EF's retrying execution strategy doesn't support the ambient TransactionScope
+builder.Services.AddDbContext<OrdersDbContext>(o => o.UseSqlServer(ordersConnectionString));
+builder.Services.AddSingleton(TimeProvider.System);
+
+builder.Services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssemblyContaining<OrdersDbContext>();
+    cfg.AddOpenBehavior(typeof(TransactionBehavior<,>));
+});
 
 builder.Services.AddRebus(
     configure => configure
@@ -21,4 +34,13 @@ builder.Services.AddRebus(
 
 builder.Services.AutoRegisterHandlersFromAssemblyOf<OrderPlacedHandler>();
 
-await builder.Build().RunAsync();
+var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    await scope.ServiceProvider.GetRequiredService<OrdersDbContext>().Database.EnsureCreatedAsync();
+}
+
+app.MapOrderEndpoints();
+
+await app.RunAsync();
