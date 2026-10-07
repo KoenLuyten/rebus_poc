@@ -66,4 +66,14 @@ using (var scope = app.Services.CreateScope())
 app.MapJsonRpc();
 app.UseJsonRpcOpenApi();
 
+// Swagger UI for the generated document. The documented paths (/Orders/CreateOrder) are documentation only,
+// so "Try it out" requests are rewritten to POST /jsonrpc; the body already contains the JSON-RPC envelope
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/openapi", "Orders JSON-RPC");
+    options.RoutePrefix = "swagger";
+    options.UseRequestInterceptor(
+        "(request) => { if (request.method === 'POST') { request.url = new URL('/jsonrpc', request.url).href; } return request; }");
+});
+
 await app.RunAsync();
