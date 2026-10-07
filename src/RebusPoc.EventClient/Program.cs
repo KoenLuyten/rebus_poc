@@ -34,6 +34,16 @@ builder.Services.AddMediatorEndpoint(cfg =>
     cfg.VerifyRequestKind = true;
 });
 
+// OpenAPI document for the JSON-RPC methods, served at GET /openapi (?format=yaml for YAML)
+builder.Services.AddJsonRpcOpenApi(cfg => cfg.PostProcess = document =>
+{
+    document.Info.Title = "Rebus POC Orders API";
+    document.Info.Version = "1.0";
+    document.Info.Description =
+        "JSON-RPC 2.0 API. Each path below documents one method (path /Orders/CreateOrder is method \"Orders.CreateOrder\"), " +
+        "but every call is sent as POST /jsonrpc with the method name in the envelope.";
+});
+
 builder.Services.AddRebus(
     configure => configure
         .Transport(t => t.UseSqlServer(new SqlServerTransportOptions(connectionString), "event-client"))
@@ -54,5 +64,16 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapJsonRpc();
+app.UseJsonRpcOpenApi();
+
+// Swagger UI for the generated document. The documented paths (/Orders/CreateOrder) are documentation only,
+// so "Try it out" requests are rewritten to POST /jsonrpc; the body already contains the JSON-RPC envelope
+app.UseSwaggerUI(options =>
+{
+    options.SwaggerEndpoint("/openapi", "Orders JSON-RPC");
+    options.RoutePrefix = "swagger";
+    options.UseRequestInterceptor(
+        "(request) => { if (request.method === 'POST') { request.url = new URL('/jsonrpc', request.url).href; } return request; }");
+});
 
 await app.RunAsync();
