@@ -13,7 +13,7 @@ public class OrderPlacedHandler(IMediator mediator, ILogger<OrderPlacedHandler> 
         logger.LogInformation("Received OrderPlaced {OrderId} ({Amount}) at {OccurredAt}",
             message.OrderId, message.Amount, message.OccurredAt);
 
-        // Same command (and transaction behavior) as POST /orders
-        await mediator.Send(new CreateOrderCommand(message.OrderId, message.Amount, message.OccurredAt));
+        // Same command (and transaction behavior) as the Orders.CreateOrder JSON-RPC method
+        await mediator.Send(new CreateOrderCommand(message.Amount) { Id = message.OrderId, PlacedAt = message.OccurredAt });
     }
 }
