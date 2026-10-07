@@ -1,28 +1,44 @@
 @baseUrl = http://localhost:5080
+@orderId = 00000000-0000-0000-0000-000000000000
 
 ### List orders
-GET {{baseUrl}}/orders
-
-### Create an order
-POST {{baseUrl}}/orders
+POST {{baseUrl}}/jsonrpc
 Content-Type: application/json
 
-{ "amount": 42.50 }
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.ListOrders" }
+
+### Create an order (the command generates the id)
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.CreateOrder", "params": { "amount": 42.50 } }
 
 ### Get an order
-GET {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.GetOrder", "params": { "id": "{{orderId}}" } }
 
 ### Update an order
-PUT {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+POST {{baseUrl}}/jsonrpc
 Content-Type: application/json
 
-{ "amount": 99.99 }
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.UpdateOrder", "params": { "id": "{{orderId}}", "amount": 99.99 } }
 
 ### Delete an order
-DELETE {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
-
-### Rollback: a negative amount throws inside the handler
-POST {{baseUrl}}/orders
+POST {{baseUrl}}/jsonrpc
 Content-Type: application/json
 
-{ "amount": -1 }
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.DeleteOrder", "params": { "id": "{{orderId}}" } }
+
+### Rollback: a negative amount throws inside the handler (-32602)
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.CreateOrder", "params": { "amount": -1 } }
+
+### Unknown method (-32601)
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.Nope" }

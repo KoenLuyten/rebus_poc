@@ -1,7 +1,9 @@
+using MediatorEndpoint;
 using Microsoft.EntityFrameworkCore;
 using Rebus.Config;
 using RebusPoc.Contracts;
 using RebusPoc.EventClient;
+using RebusPoc.EventClient.Endpoints;
 using RebusPoc.EventClient.Messaging;
 using RebusPoc.EventClient.Orders;
 
@@ -20,6 +22,16 @@ builder.Services.AddMediatR(cfg =>
 {
     cfg.RegisterServicesFromAssemblyContaining<OrdersDbContext>();
     cfg.AddOpenBehavior(typeof(TransactionBehavior<,>));
+});
+
+// Exposes every Orders request as a JSON-RPC method, e.g. CreateOrderCommand -> "Orders.CreateOrder"
+builder.Services.AddMediatorEndpoint(cfg =>
+{
+    cfg.RegisterServicesFromAssemblies(typeof(OrdersDbContext).Assembly);
+    cfg.RequestEvaluator = type => type.Namespace?.StartsWith("RebusPoc.EventClient.Orders") == true;
+    cfg.RequestName = type => new RequestName(null, "Orders", type.Name.Replace("Command", "").Replace("Query", ""));
+    cfg.RequestKind = type => typeof(ICommand).IsAssignableFrom(type) ? RequestKind.Command : RequestKind.Query;
+    cfg.VerifyRequestKind = true;
 });
 
 builder.Services.AddRebus(
@@ -41,6 +53,6 @@ using (var scope = app.Services.CreateScope())
     await scope.ServiceProvider.GetRequiredService<OrdersDbContext>().Database.EnsureCreatedAsync();
 }
 
-app.MapOrderEndpoints();
+app.MapJsonRpc();
 
 await app.RunAsync();
