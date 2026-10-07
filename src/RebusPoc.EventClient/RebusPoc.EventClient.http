@@ -42,3 +42,6 @@ POST {{baseUrl}}/jsonrpc
 Content-Type: application/json
 
 { "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.Nope" }
+
+### OpenAPI document (add ?format=yaml for YAML)
+GET {{baseUrl}}/openapi
