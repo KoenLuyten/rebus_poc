@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Testcontainers.MsSql;
@@ -11,6 +12,10 @@ await container.StartAsync();
 var connectionString = container.GetConnectionString();
 Console.WriteLine($"[apphost] SQL Server ready: {connectionString}");
 
+// The client keeps its orders in a separate database on the same server
+var ordersConnectionString = new DbConnectionStringBuilder { ConnectionString = connectionString };
+ordersConnectionString["Database"] = "Orders";
+
 using var shutdown = new CancellationTokenSource();
 void OnSignal(PosixSignalContext context)
 {
@@ -21,7 +26,8 @@ using var sigInt = PosixSignalRegistration.Create(PosixSignal.SIGINT, OnSignal);
 using var sigTerm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnSignal);
 
 // Start the client first, so its subscription exists before the provider starts publishing
-using var client = StartProject("client", "RebusPoc.EventClient");
+using var client = StartProject("client", "RebusPoc.EventClient",
+    new() { ["ConnectionStrings__Orders"] = ordersConnectionString.ConnectionString });
 await Task.Delay(TimeSpan.FromSeconds(5));
 using var provider = StartProject("provider", "RebusPoc.EventProvider");
 
@@ -47,7 +53,7 @@ foreach (var process in new[] { provider, client })
     }
 }
 
-Process StartProject(string name, string project)
+Process StartProject(string name, string project, Dictionary<string, string>? environment = null)
 {
     var startInfo = new ProcessStartInfo("dotnet")
     {
@@ -58,6 +64,10 @@ Process StartProject(string name, string project)
     };
     startInfo.Environment["ConnectionStrings__Rebus"] = connectionString;
     startInfo.Environment["DOTNET_ENVIRONMENT"] = "Development";
+    foreach (var (key, value) in environment ?? [])
+    {
+        startInfo.Environment[key] = value;
+    }
 
     var process = new Process { StartInfo = startInfo };
     process.OutputDataReceived += (_, e) => { if (e.Data is not null) Console.WriteLine($"[{name}] {e.Data}"); };

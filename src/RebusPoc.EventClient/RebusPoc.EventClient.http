@@ -1,0 +1,28 @@
+@baseUrl = http://localhost:5080
+
+### List orders
+GET {{baseUrl}}/orders
+
+### Create an order
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{ "amount": 42.50 }
+
+### Get an order
+GET {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+
+### Update an order
+PUT {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+Content-Type: application/json
+
+{ "amount": 99.99 }
+
+### Delete an order
+DELETE {{baseUrl}}/orders/00000000-0000-0000-0000-000000000000
+
+### Rollback: a negative amount throws inside the handler
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{ "amount": -1 }
