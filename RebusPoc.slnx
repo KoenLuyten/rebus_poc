@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RebusPoc.AppHost/RebusPoc.AppHost.csproj" />
+    <Project Path="src/RebusPoc.Contracts/RebusPoc.Contracts.csproj" />
+    <Project Path="src/RebusPoc.EventClient/RebusPoc.EventClient.csproj" />
+    <Project Path="src/RebusPoc.EventProvider/RebusPoc.EventProvider.csproj" />
+  </Folder>
+</Solution>
