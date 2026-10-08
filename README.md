@@ -12,6 +12,7 @@ The subscriber stores every event it receives as an order with EF Core. It also 
 | `src/RebusPoc.EventProvider` | Publishes an `OrderPlaced` event every 2 seconds. It's a one-way client with no input queue. |
 | `src/RebusPoc.EventClient` | A web app on `http://localhost:5080`. It subscribes to `OrderPlaced` on the `event-client` queue, stores each event as an order, and hosts the Orders JSON-RPC API with its OpenAPI spec (`/openapi`) and Swagger UI (`/swagger`). |
 | `src/RebusPoc.AppHost` | Launcher. It starts the SQL Server container, then starts the client and the provider. It passes the Rebus connection string to both and the Orders connection string to the client. |
+| `tests/RebusPoc.EventClient.IntegrationTests` | Integration tests that prove the order and its outbox message are committed or rolled back together. See [Integration tests](#integration-tests). |
 
 ### EventClient layout
 
@@ -48,16 +49,22 @@ The client uses MediatR 12.5, the last Apache-2.0 release.
 
 If the command fails, the transaction rolls back, including any messages the handler sent, and Rebus retries the message. After 5 failed attempts Rebus moves the message to the `error` queue. `CreateOrderCommand` is idempotent on the order Id, so an event that arrives twice is safe.
 
+The command is the unit of work, not the Rebus message. Once the command has committed, a later failure while handling the same message doesn't undo it. Rebus retries the message, and the idempotent command neither duplicates the order nor sends `OrderCreated` again.
+
 ### Transactional outbox
 
 `CreateOrderHandler` sends an `OrderCreated` domain event with `bus.SendLocal` from inside the handler. The event doesn't go to the queue right away. Rebus writes it to the `Outbox` table in the **Orders** database, in the same transaction as the new order. Rebus's outbox forwarder checks that table every second and moves committed messages to the `event-client` queue. `OrderCreatedHandler` then handles the event and logs `Domain event OrderCreated handled for order ...`. Serilog writes that handler's log lines, and only those, to the `Orders.dbo.Logs` table.
 
-The outbox table sits in the Orders database, not next to the queues in `master`. That way EF and Rebus can share one `SqlConnection` and `SqlTransaction`, with no distributed transaction. `TransactionBehavior` has two modes:
+The outbox table sits in the Orders database, not next to the queues in `master`. That way EF and Rebus can share one `SqlConnection` and `SqlTransaction`, with no distributed transaction. For every command, `TransactionBehavior`:
 
-| Where the command runs | Who owns the transaction |
-| --- | --- |
-| JSON-RPC call | The behavior. It begins an EF transaction, hands it to Rebus with `RebusTransactionScope.UseOutbox(connection, transaction)`, runs the handler, saves, completes the Rebus scope (which writes the outbox rows) and commits. Console: `Committed transaction for CreateOrderCommand`. |
-| Inside a Rebus handler (`OrderPlaced` → `CreateOrderCommand`) | Rebus. It opens an outbox connection and transaction for every incoming message. The behavior makes EF use them (`SetDbConnection` + `UseTransaction`) and saves, but doesn't commit. Rebus commits after the message handler succeeds. Console: `Saved CreateOrderCommand in the Rebus message transaction; Rebus commits it`. |
+1. begins an EF transaction,
+2. starts a `RebusTransactionScope` and hands it the transaction with `UseOutbox(connection, transaction)`,
+3. runs the handler, whose `SendLocal` only buffers the message in the scope,
+4. calls `SaveChangesAsync`,
+5. completes the Rebus scope, which writes the buffered messages to the `Outbox` table in the open transaction,
+6. commits. The console shows `Committed transaction for CreateOrderCommand`.
+
+It does this inside Rebus handlers too. The scope then replaces the handler's Rebus transaction for the duration of the command. Rebus also opens its own outbox transaction for each incoming message. The behavior deliberately doesn't let EF join that one, because Rebus.SqlServer (8.4.2) commits it *before* writing the outgoing messages to the outbox. The order and its event would then be two separate commits. The integration tests caught this.
 
 If the handler throws, nothing is committed: no order, no outbox row, so no `OrderCreated` is handled and no row is added to `Logs`.
 
@@ -134,6 +141,30 @@ The library documents each method as its own path, for example `POST /Orders/Cre
 ### Swagger UI
 
 `http://localhost:5080/swagger` shows the document in Swagger UI (`Swashbuckle.AspNetCore.SwaggerUI`, configured in `Program.cs`). Each operation's request body is already the full JSON-RPC envelope, with `method` filled in. A Swagger UI request interceptor rewrites every "Try it out" POST to `/jsonrpc`, so the documented paths can be tried directly without extra server routes.
+
+## Integration tests
+
+`tests/RebusPoc.EventClient.IntegrationTests` (xUnit v3) starts SQL Server in a Testcontainer and runs the real EventClient on it with `WebApplicationFactory<Program>`: EF, MediatR, Rebus with the outbox, and Serilog. A one-way Rebus client plays the provider and sends messages to the `event-client` queue. The tests read the database with plain SQL.
+
+```bash
+dotnet test --project tests/RebusPoc.EventClient.IntegrationTests
+```
+
+Docker must be running. `global.json` opts `dotnet test` into Microsoft.Testing.Platform, which xUnit v3 needs on the .NET 10 SDK.
+
+`OutboxTransactionTests` runs each case twice: once through MediatR directly (like JSON-RPC) and once from inside a Rebus handler (like `OrderPlacedHandler`).
+
+| Test | How it fails | Expected |
+| --- | --- | --- |
+| `Successful_command_commits_…` | it doesn't | The order and the `OrderCreated` outbox message are committed, and the event is handled |
+| `Handler_failure_after_sending_the_event_…` | `simulateFailure`: the handler throws after `SendLocal` | Neither the order nor the outbox message exists, and the event is never handled |
+| `Commit_failure_after_the_outbox_write_…` | An EF interceptor throws when the transaction commits. By then the outbox rows are written | Inside the transaction, the order **and** the outbox message were present. After the rollback, neither is |
+
+The commit-failure case is the one that proves the shared transaction. Up to the commit, both rows exist, so if Rebus had used its own transaction, the outbox message would survive EF's rollback.
+
+`OrderPlacedTests` covers the real `OrderPlaced` flow. It also covers a failure in another handler of the same message after the command committed. The order and its event stay, exactly once, and the message ends up in the `error` queue after 5 attempts.
+
+The test-only hooks (the commit interceptor, extra Rebus handlers, a probe that records handled events) live in `Hooks/` and are registered with `ConfigureTestServices`. `Program.cs` ends with `public partial class Program;` so `WebApplicationFactory` can reach it.
 
 ## Prerequisites
 

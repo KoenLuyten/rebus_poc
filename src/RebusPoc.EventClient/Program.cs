@@ -97,3 +97,6 @@ app.UseSwaggerUI(options =>
 });
 
 await app.RunAsync();
+
+// Lets the integration tests start the app with WebApplicationFactory<Program>
+public partial class Program;
