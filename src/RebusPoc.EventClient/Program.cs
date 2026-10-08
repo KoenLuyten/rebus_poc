@@ -1,11 +1,16 @@
 using MediatorEndpoint;
 using Microsoft.EntityFrameworkCore;
 using Rebus.Config;
+using Rebus.Config.Outbox;
+using Serilog;
+using Serilog.Filters;
+using Serilog.Sinks.MSSqlServer;
 using RebusPoc.Contracts;
 using RebusPoc.EventClient;
 using RebusPoc.EventClient.Endpoints;
 using RebusPoc.EventClient.Messaging;
 using RebusPoc.EventClient.Orders;
+using RebusPoc.EventClient.Orders.Events;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,7 +19,25 @@ var connectionString = builder.Configuration.GetConnectionString("Rebus")
 var ordersConnectionString = builder.Configuration.GetConnectionString("Orders")
     ?? throw new InvalidOperationException("Missing connection string 'ConnectionStrings:Orders'.");
 
-// No EnableRetryOnFailure: EF's retrying execution strategy doesn't support the ambient TransactionScope
+// Create the Orders database before Serilog and Rebus add their Logs and Outbox tables to it. EnsureCreated skips
+// creating the schema when the database already has tables
+await using (var setupDb = new OrdersDbContext(new DbContextOptionsBuilder<OrdersDbContext>().UseSqlServer(ordersConnectionString).Options))
+{
+    await setupDb.Database.EnsureCreatedAsync();
+}
+
+// Only the domain event handler's logs go to the database, so Orders.dbo.Logs shows which OrderCreated events were handled
+builder.Logging.AddSerilog(new LoggerConfiguration()
+    .Filter.ByIncludingOnly(Matching.FromSource<OrderCreatedHandler>())
+    .WriteTo.MSSqlServer(ordersConnectionString, new MSSqlServerSinkOptions
+    {
+        TableName = "Logs",
+        AutoCreateSqlTable = true,
+        BatchPeriod = TimeSpan.FromSeconds(1),
+    })
+    .CreateLogger(), dispose: true);
+
+// No EnableRetryOnFailure: EF's retrying execution strategy doesn't support user-initiated transactions
 builder.Services.AddDbContext<OrdersDbContext>(o => o.UseSqlServer(ordersConnectionString));
 builder.Services.AddSingleton(TimeProvider.System);
 
@@ -47,7 +70,9 @@ builder.Services.AddJsonRpcOpenApi(cfg => cfg.PostProcess = document =>
 builder.Services.AddRebus(
     configure => configure
         .Transport(t => t.UseSqlServer(new SqlServerTransportOptions(connectionString), "event-client"))
-        .Subscriptions(s => s.StoreInSqlServer(connectionString, "RebusSubscriptions", isCentralized: true)),
+        .Subscriptions(s => s.StoreInSqlServer(connectionString, "RebusSubscriptions", isCentralized: true))
+        // The outbox lives in the Orders database, so EF and Rebus can share one SqlConnection and transaction
+        .Outbox(o => o.StoreInSqlServer(ordersConnectionString, "Outbox")),
     onCreated: async bus =>
     {
         await bus.Subscribe<OrderPlaced>();
@@ -57,11 +82,6 @@ builder.Services.AddRebus(
 builder.Services.AutoRegisterHandlersFromAssemblyOf<OrderPlacedHandler>();
 
 var app = builder.Build();
-
-using (var scope = app.Services.CreateScope())
-{
-    await scope.ServiceProvider.GetRequiredService<OrdersDbContext>().Database.EnsureCreatedAsync();
-}
 
 app.MapJsonRpc();
 app.UseJsonRpcOpenApi();

@@ -31,7 +31,19 @@ Content-Type: application/json
 
 { "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.DeleteOrder", "params": { "id": "{{orderId}}" } }
 
-### Rollback: a negative amount throws inside the handler (-32602)
+### Outbox happy path: the order and its OrderCreated event commit together; a row for it appears in Orders.dbo.Logs
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.CreateOrder", "params": { "amount": 10 } }
+
+### Outbox rollback: throws after OrderCreated was sent (-32603); the Id in the error is in neither Orders, Outbox nor Logs
+POST {{baseUrl}}/jsonrpc
+Content-Type: application/json
+
+{ "id": "{{$guid}}", "jsonrpc": "2.0", "method": "Orders.CreateOrder", "params": { "amount": 10, "simulateFailure": true } }
+
+### Validation error: a negative amount throws before anything is sent (-32602)
 POST {{baseUrl}}/jsonrpc
 Content-Type: application/json
 

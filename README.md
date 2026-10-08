@@ -20,8 +20,8 @@ The subscriber stores every event it receives as an order with EF Core. It also 
 | `Program.cs` | Wires up EF Core, MediatR, MediatorEndpoint (with OpenAPI and Swagger UI) and Rebus, creates the Orders database, and maps the endpoints. |
 | `Endpoints/JsonRpcEndpoint.cs` | The `POST /jsonrpc` endpoint, which sends JSON-RPC calls to MediatR. |
 | `Messaging/ICommand.cs` | The `ICommand<T>` / `IQuery<T>` marker interfaces for CQRS. |
-| `Messaging/TransactionBehavior.cs` | The MediatR pipeline behavior that wraps commands in a transaction. |
-| `Orders/` | The `Order` entity, `OrdersDbContext`, `OrderDto`, and the `Commands/` and `Queries/` with their handlers. |
+| `Messaging/TransactionBehavior.cs` | The MediatR pipeline behavior that runs commands in one SQL transaction shared by EF and the Rebus outbox. |
+| `Orders/` | The `Order` entity, `OrdersDbContext`, `OrderDto`, the `Commands/` and `Queries/` with their handlers, and the `Events/` folder with the `OrderCreated` domain event and its Rebus handler. |
 | `OrderPlacedHandler.cs` | The Rebus handler. It turns `OrderPlaced` into a `CreateOrderCommand`. |
 | `RebusPoc.EventClient.http` | Sample JSON-RPC requests. |
 
@@ -39,14 +39,47 @@ The subscriber stores every event it receives as an order with EF Core. It also 
 The client uses MediatR 12.5, the last Apache-2.0 release.
 
 - Every request implements either `ICommand<T>` (it changes state) or `IQuery<T>` (it only reads). Handlers only change the `DbContext`. They never call `SaveChanges`.
-- `TransactionBehavior` wraps every **command** in a `TransactionScope` with the `ReadCommitted` isolation level. It runs the handler, calls `SaveChangesAsync` and completes the scope. If anything throws, the scope is disposed without completing, which rolls the transaction back. Queries skip the behavior.
-- EF's `EnableRetryOnFailure` is deliberately off, because EF's retrying execution strategy doesn't support an ambient `TransactionScope`.
+- `TransactionBehavior` runs every **command** in a single SQL transaction with the `ReadCommitted` isolation level. EF and the Rebus outbox share it, so messages that a handler sends are committed or rolled back together with its changes. See [Transactional outbox](#transactional-outbox). Queries skip the behavior.
+- EF's `EnableRetryOnFailure` is deliberately off, because EF's retrying execution strategy doesn't support user-initiated transactions.
 
 ### From event to order
 
 `OrderPlacedHandler` sends a `CreateOrderCommand` through `IMediator`. The event therefore goes through the same handler and the same transaction behavior as the `Orders.CreateOrder` JSON-RPC method. The handler sets the command's `Id` and `PlacedAt` from the event's `OrderId` and `OccurredAt`.
 
-If the command fails, the transaction rolls back and Rebus retries the message. After 5 failed attempts Rebus moves the message to the `error` queue. `CreateOrderCommand` is idempotent on the order Id, so an event that arrives twice is safe.
+If the command fails, the transaction rolls back, including any messages the handler sent, and Rebus retries the message. After 5 failed attempts Rebus moves the message to the `error` queue. `CreateOrderCommand` is idempotent on the order Id, so an event that arrives twice is safe.
+
+### Transactional outbox
+
+`CreateOrderHandler` sends an `OrderCreated` domain event with `bus.SendLocal` from inside the handler. The event doesn't go to the queue right away. Rebus writes it to the `Outbox` table in the **Orders** database, in the same transaction as the new order. Rebus's outbox forwarder checks that table every second and moves committed messages to the `event-client` queue. `OrderCreatedHandler` then handles the event and logs `Domain event OrderCreated handled for order ...`. Serilog writes that handler's log lines, and only those, to the `Orders.dbo.Logs` table.
+
+The outbox table sits in the Orders database, not next to the queues in `master`. That way EF and Rebus can share one `SqlConnection` and `SqlTransaction`, with no distributed transaction. `TransactionBehavior` has two modes:
+
+| Where the command runs | Who owns the transaction |
+| --- | --- |
+| JSON-RPC call | The behavior. It begins an EF transaction, hands it to Rebus with `RebusTransactionScope.UseOutbox(connection, transaction)`, runs the handler, saves, completes the Rebus scope (which writes the outbox rows) and commits. Console: `Committed transaction for CreateOrderCommand`. |
+| Inside a Rebus handler (`OrderPlaced` → `CreateOrderCommand`) | Rebus. It opens an outbox connection and transaction for every incoming message. The behavior makes EF use them (`SetDbConnection` + `UseTransaction`) and saves, but doesn't commit. Rebus commits after the message handler succeeds. Console: `Saved CreateOrderCommand in the Rebus message transaction; Rebus commits it`. |
+
+If the handler throws, nothing is committed: no order, no outbox row, so no `OrderCreated` is handled and no row is added to `Logs`.
+
+#### Testing it
+
+`CreateOrderCommand` has a `simulateFailure` param. When it's `true`, the handler throws **after** it has sent `OrderCreated`. `RebusPoc.EventClient.http` has a request for each case:
+
+| Request | Response | Database afterwards |
+| --- | --- | --- |
+| *Outbox happy path* `{ "amount": 10 }` | the new order | A row in `Orders`, and about 1–2 seconds later a row in `Logs` with the order Id |
+| *Outbox rollback* `{ "amount": 10, "simulateFailure": true }` | error `-32603`, `Simulated failure after dispatching OrderCreated for order <id>` | That Id is in neither `Orders`, `Outbox` nor `Logs`. The console shows `Rolled back transaction for CreateOrderCommand`. |
+
+Check the results with:
+
+```sql
+USE Orders;
+SELECT TOP 10 Id, TimeStamp, Message FROM Logs ORDER BY Id DESC;    -- handled domain events
+SELECT * FROM Orders WHERE Id = '<id>';                               -- empty after a rollback
+SELECT Id, MessageId, DestinationAddress, Sent FROM Outbox ORDER BY Id DESC;  -- Sent = 1 once forwarded
+```
+
+The provider also creates an order every 2 seconds, so `Logs` keeps growing. Filter on the Id you're testing.
 
 ## Orders API (JSON-RPC)
 
@@ -64,7 +97,7 @@ At startup the library scans for MediatR requests in the `RebusPoc.EventClient.O
 | --- | --- | --- |
 | `Orders.ListOrders` | none | all orders, newest first |
 | `Orders.GetOrder` | `{ "id": "..." }` | the order, or `null` |
-| `Orders.CreateOrder` | `{ "amount": 42.5 }` | the new order. The command generates the Id, and callers can't set `id` or `placedAt`. |
+| `Orders.CreateOrder` | `{ "amount": 42.5 }`, optionally `"simulateFailure": true` | the new order. The command generates the Id, and callers can't set `id` or `placedAt`. `simulateFailure` throws after `OrderCreated` is sent, to test the [outbox rollback](#testing-it). |
 | `Orders.UpdateOrder` | `{ "id": "...", "amount": 99.99 }` | the updated order, or `null` if not found |
 | `Orders.DeleteOrder` | `{ "id": "..." }` | `true`, or `false` if not found |
 
@@ -191,7 +224,7 @@ The relations are **logical only**: none of these tables have foreign keys. `Reb
 
 ### Orders (`Orders`)
 
-At startup `EventClient` creates the `Orders` database with EF Core's `EnsureCreated`. It has a single table:
+At startup `EventClient` creates the `Orders` database and its `Orders` table with EF Core's `EnsureCreated`. It does that before Serilog and Rebus start, because they then add their `Logs` and `Outbox` tables to the same database, and `EnsureCreated` skips the schema when the database already has tables.
 
 ```mermaid
 erDiagram
@@ -203,6 +236,9 @@ erDiagram
     }
 ```
 
+- **`Outbox`** is created by Rebus. It holds the messages sent inside a command's transaction until the forwarder sends them. Its columns are `Id`, `CorrelationId`, `MessageId`, `SourceQueue`, `DestinationAddress`, `Headers`, `Body` and `Sent`, and `OutboxCleaner` removes sent rows periodically.
+- **`Logs`** is created by the Serilog MSSqlServer sink with its default columns (`Id`, `Message`, `MessageTemplate`, `Level`, `TimeStamp`, `Exception`, `Properties`). It only holds `OrderCreatedHandler` log lines.
+
 The schema isn't migrated. `EnsureCreated` only creates the database when it doesn't exist yet. With the AppHost, the database is recreated on every run.
 
 ## Inspecting the database
@@ -213,3 +249,5 @@ While the AppHost is running, connect to the printed connection string with any 
 - `master.dbo.[event-client]`: the client's input queue (normally empty, because messages are taken right away)
 - `master.dbo.error`: messages that failed to process
 - `Orders.dbo.Orders`: the orders, from both events and JSON-RPC calls
+- `Orders.dbo.Outbox`: messages sent from command handlers, waiting to be forwarded (or already sent)
+- `Orders.dbo.Logs`: one row per handled `OrderCreated` domain event
